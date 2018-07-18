@@ -363,9 +363,132 @@ Here are the files that `manage.py startapp` created for you:
 - `tests.py` - this is where your tests would go if you were to write them
 - `views.py` - this is for the views you write that pertain to the models in this app. You don't have to write them here. You could, for example, write all your views in `django_todo/views.py`. It's here, however, so that you can separate your concerns easier. This becomes far more relevant when you have sprawling applications that cover many conceptual spaces.
 
-Not created for you by `manage.py` is a `urls.py` file for this app, however you can just make that yourself.
+Not created for you by `manage.py` is a `urls.py` file for this app.
+However, you can just make that yourself.
 
-## Django - Managing the Database
+Before moving forward we should do ourselves a favor and add this new Django app to our list of `INSTALLED_APPS` in `django_todo/settings.py`.
+
+```python
+# in settings.py
+INSTALLED_APPS = [
+    'django.contrib.admin',
+    'django.contrib.auth',
+    'django.contrib.contenttypes',
+    'django.contrib.sessions',
+    'django.contrib.messages',
+    'django.contrib.staticfiles',
+    'rest_framework',
+    'django_todo',
+    'todo' # <--- the line was added
+]
+```
+
+If we enter `todo/models.py` we'll see that `manage.py` already wrote a bit of code for us to get started.
+Diverging from models were created in the Flask, Tornado, and Pyramid implementations, Django doesn't leverage a third party to manage database sessions or the construction of its object instances.
+It's all rolled into Django's `django.db.models` submodule.
+
+To create a model in Django you'll need to build a `class` that inherits from `models.Model`.
+All of the fields that will apply to instances of that model should appear as class attributes.
+Instead of importing columns and field types from SQLAlchemy like we have in the past, all of our fields will come directly from `django.db.models`.
+
+```python
+# todo/models.py
+from django.db import models
+
+class Task(models.Model):
+    """Tasks for the To Do list."""
+    name = models.CharField(max_length=256)
+    note = models.TextField(blank=True, null=True)
+    creation_date = models.DateTimeField(auto_now_add=True)
+    due_date = models.DateTimeField(blank=True, null=True)
+    completed = models.BooleanField(default=False)
+```
+
+While there are some definite differences between what Django needs from you and what SQLAlchemy-based systems needed from you, the overall contents and structure is more or less the same.
+Let's point out the differences.
+
+We no longer need to declare a separate field for an auto-incremented ID number for our object instances.
+Django builds one for us unless we specify a different field as the primary key. 
+
+Instead of instantiating Column objects that are passed data type objects, we just directly reference the data types as the columns themselves.
+
+The `Unicode` field became either `models.CharField` or `models.TextField`.
+`CharField` is for small text fields of a specific maximum length, whereas `TextField` is for any amount of text.
+
+When the `TextField` needed to be able to be blank, it was specified in TWO ways.
+`blank=True` says that when an instance of this model is constructed and the data that's being attached to this field is being validated, it's ok for that data to be empty.
+This is subtly different from `null=True`, which says that when the table for this model class gets constructed, the column corresponding to `note` will allow for blank or `NULL` entries.
+So to sum that all up, `blank=True` controls how data gets added to model instances while `null=True` controls how the database table holding that data got constructed in the first place.
+
+The `DateTime` field grew some muscle and became able to do some work for us instead of us having to modify the `__init__` method for the class.
+For the `creation_date` field we specify that `auto_now_add=True`.
+What this means in a practical sense is that **when a new model instance is created** Django will **auto**matically record the date and time of **now** as this field's value.
+That's handy!
+
+When neither `auto_now_add` or its cousin `auto_now` are set to `True`, `DateTimeField` will expect data like any other field.
+It'll need to be fed with a proper `datetime` object to be valid.
+Here, `blank` and `null` are both set to `True` so that an item on the To Do list can just be an item to be done at some point in the future, with no defined date or time.
+
+`BooleanField` just ends up being a field that can take one of two values: `True` or `False`.
+Here, the default value is set to be `False`.
+
+### Managing the Database
+
+As was mentioned earlier, Django has its own way of doing database management.
+Instead of us having to write...really any code at all regarding our database, we leverage the `manage.py` script that Django provided for us on construction.
+It'll manage for us not just the construction of the tables for our database, but also any updates we wish to make to those tables _**without**_ having to blow the whole thing away!
+
+Because we've constructed a _new_ model we need to make our database aware of it.
+The first thing we need to do is put into code the schema that corresponds to this model.
+The `makemigrations` command of `manage.py` will take a snapshot of the model class we built and all of its fields.
+It'll take that information and package it into a Python script that'll live in this particular Django app's `migrations` directory.
+**You will never have a reason to run these scripts yourself.**
+It'll exist solely so that Django can use it as a basis to update your database table, or to inherit information from when you update your model class.
+
+```
+(django-someHash) $ ./manage.py makemigrations
+Migrations for 'todo':
+  todo/migrations/0001_initial.py
+    - Create model Task
+```
+
+This will look at every app listed in `INSTALLED_APPS` and check for models that exist in those apps.
+It'll then check the corresponding `migrations` directory for migration files and compare them to the models in each of those `INSTALLED_APPS` apps.
+If a model has been upgraded beyond what the latest migration says should exist, a new migration file will be created that inherits from the most recent one.
+It'll be automatically named, and also be given a message that says what changed since the last migration.
+
+If it's been a while since you last worked on your Django project and can't remember if your models were in sync with your migrations, you have no need to fear.
+`makemigrations` is an idempotent operation; your `migrations` directory will only have one copy of the current model configuration whether you run `makemigrations` once or twenty times.
+Even better than that, if you run `./manage.py runserver` Django can detect that your models are out of sync with your migrations it'll just flat out tell you in colored text so that you can make the appropriate choice.
+
+This next point is something that trips everybody up at least once: **creating a migration file does not immediately affect your database**.
+When you ran `makemigrations` you prepared your Django project to define how a given table should be created and end up looking.
+It's still on you to apply those changes to your database.
+That's what the `migrate` command is for.
+
+```
+(django-someHash) $ ./manage.py migrate
+Operations to perform:
+  Apply all migrations: admin, auth, contenttypes, sessions, todo
+Running migrations:
+  Applying contenttypes.0001_initial... OK
+  Applying auth.0001_initial... OK
+  Applying admin.0001_initial... OK
+  Applying admin.0002_logentry_remove_auto_add... OK
+  Applying contenttypes.0002_remove_content_type_name... OK
+  Applying auth.0002_alter_permission_name_max_length... OK
+  Applying auth.0003_alter_user_email_max_length... OK
+  Applying auth.0004_alter_user_username_opts... OK
+  Applying auth.0005_alter_user_last_login_null... OK
+  Applying auth.0006_require_contenttypes_0002... OK
+  Applying auth.0007_alter_validators_add_error_messages... OK
+  Applying auth.0008_alter_user_username_max_length... OK
+  Applying auth.0009_alter_user_last_name_max_length... OK
+  Applying sessions.0001_initial... OK
+  Applying todo.0001_initial... OK
+```
+
+When you actually migrate your schema changes, Django first checks to see if the other `INSTALLED_APPS` have migrations to be applied.
 
 ## Django - Connecting Models to Views
 
