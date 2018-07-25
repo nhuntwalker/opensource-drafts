@@ -488,7 +488,171 @@ Running migrations:
   Applying todo.0001_initial... OK
 ```
 
-When you actually migrate your schema changes, Django first checks to see if the other `INSTALLED_APPS` have migrations to be applied.
+When you actually apply your migrations, Django first checks to see if the other `INSTALLED_APPS` have migrations to be applied.
+It checks them in roughly the order that they're listed.
+You want your app to be listed last because you want to make sure that, in case your model depends on any of Django's built-in models, the database updates that are made don't suffer from dependency issues.
+
+We have another model to build: the User model.
+However, the game has changed a bit sine we're using Django.
+So many applications require some sort of User model that Django's `django.contrib.auth` package just has its own built for you to use.
+If it weren't for the authentication token that we require for our users, we could just move on ahead reinventing the wheel.
+
+However, we need that token.
+There's a couple ways that we can handle this.
+
+- Inherit from Django's `User` object, making our own object that extends it by adding a `token` field
+- Create a brand new object that exists in a one-to-one relationship with Django's `User` object, whose only purpose is to hold a token
+
+Note that I didn't include a method that involved creating a new User object from the ground up or modifying Django's `User` object in any real way.
+That's because there are certain parts of Django's infrastructure that involve that `User` object, particularly when it comes to user authentication.
+
+I'm in the habit of building object relationships, so I'll go with the second option.
+Let's call it a `Owner` as it basically has a similar connotation as a `User`, which is what we want
+
+Out of sheer laziness I could just include this new `Owner` object in `todo/models.py`, but I'm going to refrain from that.
+`Owner` doesn't explicitly have to do with the creation or maintenance of items on the task list.
+Conceptually, the `Owner` is simply the *owner* of the task.
+There may even come a time where I want to expand this `Owner` to include other data that has absolutely nothing to do with tasks.
+
+Just to be safe, and to show that spinning up new Django apps is a small deal, let's make an `owner` app whose job it is to house and handle this `Owner` object.
+
+```
+(django-someHash) $ ./manage.py startapp owner
+```
+
+Don't forget to add it to the list of `INSTALLED_APPS` in `settings.py`.
+
+```python
+INSTALLED_APPS = [
+    'django.contrib.admin',
+    'django.contrib.auth',
+    'django.contrib.contenttypes',
+    'django.contrib.sessions',
+    'django.contrib.messages',
+    'django.contrib.staticfiles',
+    'rest_framework',
+    'django_todo',
+    'todo',
+    'owner'
+]
+```
+
+In the interest of full disclosure, when I first wrote this bit I intended to call it "profile" but it conflicted with an existing Python module so here we are.
+
+If we look at the root of our Django project, we now have two Django apps:
+
+```
+(django-someHash) $ ls
+Pipfile      Pipfile.lock django_todo  manage.py    owner        todo
+```
+
+In `owner/models.py` let's build this `Owner` model.
+As mentioned earlier, it'll have a one-to-one relationship with Django's built-in `User` object.
+We can enforce this relationship with Django's `models.OneToOneField`
+
+```python
+# owner/models.py
+from django.db import models
+from django.contrib.auth.models import User
+import secrets
+
+class Owner(models.Model):
+    """The object that owns tasks."""
+    user = models.OneToOneField(User, on_delete=models.CASCADE)
+    token = models.CharField(max_length=256)
+
+    def __init__(self, *args, **kwargs):
+        """On construction, set token."""
+        self.token = secrets.token_urlsafe(64)
+        super().__init__(*args, **kwargs)
+```
+
+Here we're saying that the `Owner` object is linked to the `User` object, with one `owner` instance per `user` instance.
+`on_delete=models.CASCADE` dictates that if the corresponding `User` gets deleted, the `Owner` instance it's linked to will also get deleted.
+
+Now our `Owner` needs to own some `Task` objects.
+It'll be very similar to the `OneToOneField` seen above, except that we'll stick a `ForeignKey` field on the `Task` object pointing to an `Owner`.
+
+```python
+# todo/models.py
+from django.db import models
+from owner.models import Owner
+
+class Task(models.Model):
+    """Tasks for the To Do list."""
+    name = models.CharField(max_length=256)
+    note = models.TextField(blank=True, null=True)
+    creation_date = models.DateTimeField(auto_now_add=True)
+    due_date = models.DateTimeField(blank=True, null=True)
+    completed = models.BooleanField(default=False)
+    owner = models.ForeignKey(Owner, on_delete=models.CASCADE)
+```
+
+Every To Do list task has exactly one owner, who can multiple tasks.
+When that owner is deleted, anything task that they own goes with them.
+
+Woo! We have our models!
+Welcome to the Django way of declaring objects.
+
+Now let's talk about how we're going to access their data.
+
+## Django - Serializing Models
+
+In the blog posts prior to this one, I didn't focus much on how the data for the objects that we created was going to be displayed.
+Admittedly, I should have.
+
+We're going to be doing something with our resources beyond just "Hello World", "here's a listing of routes", and "oh hey, you created a new resource, good for you!"
+As such, we're going to want to see some sort of JSON-ified output that represents those resources well.
+Taking that object's data and transforming it into a JSON object for submission across HTTP is a version of **data serialization**.
+In serializing data, we're taking the data that we currently have and reformatting it to fit some standard, more-easily-digestible form.
+
+If I were doing this with Flask, Pyramid, and Tornado, I'd create a new method on each model that I intended to give the user direct access to called `to_json()`.
+The only job of  `to_json()` would be to return a JSON-serializable (i.e. numbers, strings, lists, dicts) dictionary with whatever fields I want displayed for the object in question.
+
+It's probably look something like this for the `Task` object:
+
+```python
+class Task(Base):
+    ...all the fields...
+
+    def to_json(self):
+        """Convert task attributes to a JSON-serializable dict."""
+        return {
+            'id': self.id,
+            'name': self.name,
+            'note': self.note,
+            'creation_date': self.creation_date.strftime('%m/%d/%Y %H:%M:%S'),
+            'due_date': self.due_date.strftime('%m/%d/%Y %H:%M:%S'),
+            'completed': self.completed,
+            'user': self.user_id
+        }
+```
+
+It's not fancy, but it does the job.
+
+Django REST Framework, however, provides you with an object that'll not only do that for you, but also validate inputs when you want to create new object instances or update existing ones.
+It's called the [ModelSerializer](http://www.django-rest-framework.org/api-guide/serializers/#modelserializer).
+
+Django REST Framework's `ModelSerializer` works best for simple objects.
+As an example, imagine that we didn't have that `ForeignKey` on the `Task` object.
+We could create a serializer for our `Task` that'd convert its field values to JSON as necessary with the following declaration:
+
+```python
+# todo/serializers.py
+from rest_framework import serializers
+from todo.models import Task
+
+class TaskSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Task
+        fields = ('id', 'name', 'note', 'creation_date', 'due_date', 'completed')
+```
+
+Inside our new `TaskSerializer` we create a `Meta` class.
+`Meta`'s job here is just to hold information, or **metadata**, about the thing you're attempting to serialize.
+Then, we note the specific fields that we want to show.
+We could, alternatively, use the `exclude` keyword instead of `fields` to tell Django REST Framework that we want every field except for a select few.
+You can have as many serializers as you like, so maybe you want one for a small subset of fields and one for all the fields? Go wild here.
 
 ## Django - Connecting Models to Views
 
