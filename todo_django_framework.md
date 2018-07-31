@@ -591,10 +591,149 @@ class Task(models.Model):
 Every To Do list task has exactly one owner, who can multiple tasks.
 When that owner is deleted, anything task that they own goes with them.
 
+Let's now run `makemigrations` to take a new snapshot of our data model setup, then `migrate` to apply those changes to our database.
+
+```
+(django-someHash) django $ ./manage.py makemigrations
+You are trying to add a non-nullable field 'owner' to task without a default; we can't do that (the database needs something to populate existing rows).
+Please select a fix:
+ 1) Provide a one-off default now (will be set on all existing rows with a null value for this column)
+ 2) Quit, and let me add a default in models.py
+```
+
+Oh no! We have a problem! What happened?
+Well, when we created the `Owner` object and added it as a `ForeignKey` to `Task`, we basically necessitated that every `Task` requires an `Owner`.
+However, the first migration we made for the `Task` object didn't include that requirement.
+So, even though there's no data currently existing in our database's table, Django is doing a pre-check on our migrations to make sure that they're compatible and this new migration that we're proposing is not.
+
+There's a couple ways to deal with this sort of problem:
+
+1. Blow away the current migration and build a new one that includes the current model configuration
+2. Add a default value to the `owner` field on the `Task` object
+
+Option 2 wouldn't really make too much sense here; we'd be proposing that any `Task` that was created would, by default, be linked to some default owner despite one not even necessarily existing.
+The sensible thing to do here would be option 1: destroy and rebuild.
+
+Delete the migrations from the migrations directory, redo `makemigrations`.
+
+```
+(django-someHash) django $ ./manage.py makemigrations
+Migrations for 'owner':
+  owner/migrations/0001_initial.py
+    - Create model Owner
+Migrations for 'todo':
+  todo/migrations/0001_initial.py
+    - Create model Task
+```
+
 Woo! We have our models!
 Welcome to the Django way of declaring objects.
 
+For good measure, let's ensure that whenever a `User` is made, it gets automatically linked with a new `Owner` object.
+We can do this using Django's `signals` system. 
+Basically we say exactly what we intend: "when you get the signal that a new `User` has been constructed, construct a new `Owner` and set that new `User` as that `Owner`'s `user` field."
+In practice that looks like:
+
+```python
+# owner/models.py
+from django.contrib.auth.models import User
+from django.db import models
+from django.db.models.signals import post_save
+from django.dispatch import receiver
+
+import secrets
+
+
+class Owner(models.Model):
+    """The object that owns tasks."""
+    user = models.OneToOneField(User, on_delete=models.CASCADE)
+    token = models.CharField(max_length=256)
+
+    def __init__(self, *args, **kwargs):
+        """On construction, set token."""
+        self.token = secrets.token_urlsafe(64)
+        super().__init__(*args, **kwargs)
+
+
+@receiver(post_save, sender=User)
+def link_user_to_owner(sender, **kwargs):
+    """If a new User is saved, create a corresponding Owner."""
+    if kwargs['created']:
+        owner = Owner(user=kwargs['instance'])
+        owner.save()
+```
+
+We set up a function that listens for signals to be sent from the `User` object built into Django.
+Particularly, it's waiting for just after a `User` object has been saved.
+This can come from either a new `User` or an update to an existing `User`; we discern between the two scenarios within the listening function.
+
+If the thing sending the signal was a newly-created instance, `kwargs['created']` will have the value of `True`.
+We only want to do something if this is `True`.
+If it's a new instance, we create a new `Owner`, setting its `user` field to be the new `User` instance that was created.
+After that we `save()` the new `Owner`.
+This will commit our change to the database if all is well.
+It'll fail if the data doesn't validate against the fields we declared.
+
 Now let's talk about how we're going to access their data.
+
+## Django - Accessing Model Data
+
+In the Flask, Pyramid, and Tornado frameworks we accessed model data by running queries against some database session.
+Maybe it was attached to a `request` object, maybe it was a standalone session.
+Either way, we had to establish a live connection to the database and query on that connection.
+
+This isn't the way that Django works.
+Django by default doesn't leverage any third party to converse with the database, instead choosing to allow the model classes to maintain their own conversations with the database.
+
+Every model class that inherits from `django.db.models.Model` will have attached a `objects` object.
+This will take the place of the `session` or `dbsession` that we've become so familiar with.
+Let's open the special shell that Django gives you and investigate how this `objects` object works.
+
+```
+(django-someHash) django $ ./manage.py shell
+Python 3.7.0 (default, Jun 29 2018, 20:13:13) 
+[Clang 9.1.0 (clang-902.0.39.2)] on darwin
+Type "help", "copyright", "credits" or "license" for more information.
+(InteractiveConsole)
+>>>
+```
+
+The Django shell is different from your normal Python shell in that it's aware of the Django project that you've been building and can do easy imports of your models, views, settings, etc. without you having to worry about installing a package.
+We can access our models with a simple import.
+
+```python
+>>> from owner.models import Owner
+>>> Owner
+<class 'owner.models.Owner'>
+```
+
+Currently we have no `Owner` instances.
+We can tell by querying for them with `Owner.objects.all()`.
+
+```python
+>>> Owner.objects.all()
+<QuerySet []>
+```
+
+Anytime you run a query method on the `<Model>.objects` object, you'll get a `QuerySet` back.
+For our intents and purposes right now it's effectively a `list`, and this `list` is showing us that it's empty.
+Let's make an `Owner` by making a `User`.
+
+```python
+>>> from django.contrib.auth.models import User
+>>> new_user = User(username='kenyattamurphy', email='kenyatta.murphy@gmail.com')
+>>> new_user.set_password('wakandaforever')
+>>> new_user.save()
+```
+
+If we query for all of our `Owner`s now, we should find Kenyatta.
+
+```python
+>>> Owner.objects.all()
+<QuerySet [<Owner: Owner object (1)>]>
+```
+
+Yay we've got data!
 
 ## Django - Serializing Models
 
@@ -633,6 +772,10 @@ It's not fancy, but it does the job.
 Django REST Framework, however, provides you with an object that'll not only do that for you, but also validate inputs when you want to create new object instances or update existing ones.
 It's called the [ModelSerializer](http://www.django-rest-framework.org/api-guide/serializers/#modelserializer).
 
+Django REST Framework's `ModelSerializer` is effectively documentation for your models.
+They don't have lives of their own if there are no models attached.
+Their main job is to accurately represent your model and make the conversion to JSON thoughtless when your model's data needs to be serialized and sent over a wire.
+
 Django REST Framework's `ModelSerializer` works best for simple objects.
 As an example, imagine that we didn't have that `ForeignKey` on the `Task` object.
 We could create a serializer for our `Task` that'd convert its field values to JSON as necessary with the following declaration:
@@ -643,6 +786,7 @@ from rest_framework import serializers
 from todo.models import Task
 
 class TaskSerializer(serializers.ModelSerializer):
+
     class Meta:
         model = Task
         fields = ('id', 'name', 'note', 'creation_date', 'due_date', 'completed')
@@ -651,8 +795,28 @@ class TaskSerializer(serializers.ModelSerializer):
 Inside our new `TaskSerializer` we create a `Meta` class.
 `Meta`'s job here is just to hold information, or **metadata**, about the thing you're attempting to serialize.
 Then, we note the specific fields that we want to show.
+If we wanted to show all of the fields, we could just shortcut the process and use `'__all__'`.
 We could, alternatively, use the `exclude` keyword instead of `fields` to tell Django REST Framework that we want every field except for a select few.
 You can have as many serializers as you like, so maybe you want one for a small subset of fields and one for all the fields? Go wild here.
+
+In our particular case, there is a relation between each `Task` and its owner `Owner` that must be reflected here.
+As such, we need to borrow the `serializers.PrimaryKeyRelatedField` object to specify that each `Task` will have an `Owner`.
+Its owner will be found from the set of all owners that exists.
+We get that set by doing a query for those owners and returning the results that we want to be associated with this serializer: `Owner.objects.all()`.
+
+```python
+# todo/serializers.py
+from rest_framework import serializers
+from todo.models import Task
+from owner.models import Owner
+
+class TaskSerializer(serializers.ModelSerializer):
+    owner = serializers.PrimaryKeyRelatedField(queryset=Owner.objects.all())
+
+    class Meta:
+        model = Task
+        fields = ('id', 'name', 'note', 'creation_date', 'due_date', 'completed')
+```
 
 ## Django - Connecting Models to Views
 
