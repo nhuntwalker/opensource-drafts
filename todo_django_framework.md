@@ -187,13 +187,13 @@ Within `views.py` we'll create our first "Hello, world!" view.
 
 ```python
 # in django_todo/views.py
-from rest_framework.response import Response
+from rest_framework.response import JsonResponse
 from rest_framework.views import APIView
 
 class HelloWorld(APIView):
     def get(self, request, format=None):
         """Print 'Hello, world!' as the response body."""
-        return Response("Hello, world!")
+        return JsonResponse("Hello, world!")
 ```
 
 Every Django REST Framework class-based view inherits either directly or indirectly from `APIView`.
@@ -861,7 +861,7 @@ The view itself can live in `django_todo.views` since it doesn't pertain to a sp
 
 ```python
 # django_todo/views.py
-from rest_framework.response import Response
+from rest_framework.response import JsonResponse
 from rest_framework.views import APIView
 
 class InfoView(APIView):
@@ -881,7 +881,7 @@ class InfoView(APIView):
             "task update": 'PUT /api/v1/accounts/<username>/tasks/<id>',
             "delete task": 'DELETE /api/v1/accounts/<username>/tasks/<id>'
         }
-        return Response(output)
+        return JsonResponse(output)
 ```
 
 This is pretty much identical to what we had in Tornado.
@@ -921,19 +921,140 @@ I didn't specify a particular user, or really much of a path at all.
 Since there will be a couple of routes requiring the base path `/api/v1/accounts/<username>/tasks`, I figure why write it again and again when I can just write it once?
 
 Django allows me to take a whole suite of URLs and import them into the base `django_todo/urls.py` file.'
-I can then give every single one of those imported URLs the same base path, only worrying about the varying parts when, you know, they vary.
+I can then give every single one of those imported URLs the same base path, only worrying about the variable parts when, you know, they vary.
 
 ```python
 # in django_todo/urls.py
 from django.urls import include, path
-from todo.views import TaskListView
+from django_todo.views import InfoView
 
 urlpatterns = [
-    path('', TaskListView.as_view(), name="list_tasks"),
+    path('api/v1', InfoView.as_view(), name="info"),
     path('api/v1/accounts/<str:username>/tasks', include('todo.urls'))
 ]
 ```
 
 And now every URL coming from `todo/urls.py` will be prefixed with the path `api/v1/accounts/<str:username>/tasks`.
 
+Let's build out the actual view itself in `todo/views.py`
+
+```python
+# todo/views.py
+from django.shortcuts import get_object_or_404
+from rest_framework.response import JsonResponse
+from rest_framework.views import APIView
+
+from owner.models import Owner
+from todo.models import Task
+from todo.serializers import TaskSerializer
+
+
+class TaskListView(APIView):
+    def get(self, request, username, format=None):
+        """Get all of the tasks for a given user."""
+        owner = get_object_or_404(Owner, user__username=username)
+        tasks = Task.objects.filter(owner=owner).all()
+        serialized = TaskSerializer(tasks, many=True)
+        return JsonResponse({
+            'username': username,
+            'tasks': serialized.data
+        })
+```
+
+There's a lot going on here in a little bit of code, so let's walk through it.
+
+We start out with the same inheritance of the `APIView` that we've been using, laying the groundwork for what will be our view.
+We override the same `get` method we've overridden before, adding a parameter that allows our view to receive the `username` from the incoming request.
+
+Our `get` method will then use that `username` to grab the `Owner` associated with that user.
+This `get_object_or_404` method allows us to do just that, with a little something special added in for ease of use.
+It would make sense that if the specified user cannot be found, there's no point in looking for their tasks, and in fact we'd want to return a 404 error.
+
+`get_object_or_404` gets a single object based on whatever criteria we pass in and either returns that object or raises an `Http404` exception.
+We can set that criteria based on attributes of the object.
+The `Owner` objects all are attached to a `User` through their `user` attribute.
+We don't have a `User` though, we have a `username`.
+So, we say to `get_object_or_404` "when you look for an `Owner`, check to see that the `User` attached to it has the `username` that I want" by specifying `user__username`.
+That's TWO underscores; with Django, when you're filtering through a QuerySet, the two underscores means "attribute of this nested object".
+And you can nest those attributes as much as you need.
+
+Now that I have the `Owner` I want, I use that `Owner` to filter through all the tasks to only get the ones that belong to it with `Task.objects.filter`.
+I could've used the same nested-attribute pattern that I did with `get_object_or_404` to drill into the `User` connected to the `Owner` connected to the `Tasks`, but I figured it was a new enough pattern as it was and there was no need to get that crazy with it.
+
+`Task.objects.filter(owner=owner).all()` will provide me with a `QuerySet` of all the `Task` objects that match my query.
+Great.
+The `TaskSerializer` will then take that `QuerySet` and all of its data, along with the flag of `many=True` to notify it as being a collection of items instead of just one item, and return to me a serialized set of results.
+Finally, I provide the outgoing `Response` with just JSON-serialized data.
+
+The `post` method will look somewhat different from what we've seen before.
+
+```python
+# still in todo/views.py
+# ...other imports...
+from rest_framework.parsers import JSONParser
+from datetime import datetime
+
+
+class TaskListView(APIView):
+    ...
+    def post(self, request, username, format=None):
+        """Create a new Task."""
+        owner = get_object_or_404(Owner, user__username=username)
+        data = JSONParser().parse(request)
+        data['owner'] = owner.id
+        if data['due_date']:
+            data['due_date'] = datetime.strptime(data['due_date'], '%d/%m/%Y %H:%M:%S')
+
+        new_task = TaskSerializer(data=data)
+        if new_task.is_valid():
+            new_task.save()
+            return JsonResponse({'msg': 'posted'}, status=201)
+
+        return JsonResponse(new_task.errors, status=400)
+```
+
+When we receive data from the client, we parse that data into a dictionary using `JSONParser().parse(request)`.
+We add the owner to the data, and format the `due_date` if one exists.
+Our `TaskSerializer` handles the heavy lifting of constructing our new `Task` and validating it.
+If the data being attached to the new `Task` is valid we commit and send back an appropriate "Yay! We made a new thing!" response.
+If not, we send the client some errors and a `400 Bad Request` status code.
+
+If we were to build out the `put` view for updating a `Task`, it would look very similar to this.
+The main difference would be that when we instantiate the `TaskSerializer`, instead of *just* passing in the new data, we'd pass in the old object and the new data for that object like `TaskSerializer(existing_task, data=data)`.
+You'd still do the validity check, and still send back the responses you want to send back.
+
 ## Wrapping Up
+
+Django as a framework is **_highly customizable_**, and everyone has their own way of stitching together a Django project.
+The way that I've shown it here isn't necessarily the exact way that a Django project needs to be set up; it's just a) what I'm familiar with, and b) what leverages Django's own management system.
+Django projects grow in complexity as you separate concepts into their own little silos.
+You do that so that it becomes easier for multiple people to contribute to the overall project without stepping on each others' toes.
+
+The vast map of files that is a Django project, however, doesn't make it more performant or naturally pre-disposed to a microservice architecture.
+On the contrary, it can very easily become a monolith.
+That may be useful for your project.
+It may make it harder for your project to be manageable, especially as it grows.
+
+Consider your options carefully and use the right tool for the right job.
+For a project such as this, Django likely isn't the right tool.
+Django is meant to handle multiple sets of models that cover a variety of different project areas that may share some common ground.
+
+This project is a small, two-model project with a handful of routes.
+If we were to build this out more, we'd only have 7 routes and still the same two models.
+It's hardly enough to justify a Django project.
+This would be great if we expected that in the future this project would expand.
+This is not one of those projects.
+You choose the right tool for the right job.
+This is choosing a flamethrower to light a candle.
+It's absolute overkill.
+
+Still, a web framework is a web framework, regardless of which one you use.
+It can take in requests and provide responses, so you do as you wish.
+Just be aware of what overhead comes with your choice of framework.
+
+That's it!
+We've reached the end of this series!
+I hope that it has been an enlightening adventure, and will help you make more than just the most-familiar choice when you're thinking about how to build out your next project.
+Make sure to read the documentation for each framework to expand on anything covered in this series (as it's not even the least bit comprehensive).
+There's a wide world of stuff to get into for each.
+Happy coding!
