@@ -851,4 +851,89 @@ It's time to dig into some views.
 
 ## Django - Connecting Models to Views
 
+So we've built the models and the serializers, now we need to set up the views and URLs for our application.
+After all, can't do anything with an application that has no views.
+
+We've already seen an example with the `HelloWorld` view above, but as always that's a contrived example and doesn't really show you what you can do with Django REST Framework's views.
+
+Let's start with the `InfoView`, where all we want to do is package and send out a dictionary of our proposed routes.
+The view itself can live in `django_todo.views` since it doesn't pertain to a specific model (and thus doesn't really belong in a specific app).
+
+```python
+# django_todo/views.py
+from rest_framework.response import Response
+from rest_framework.views import APIView
+
+class InfoView(APIView):
+    """List of routes for this API."""
+    def get(self, request):
+        output = {
+            'info': 'GET /api/v1',
+            'register': 'POST /api/v1/accounts',
+            'single profile detail': 'GET /api/v1/accounts/<username>',
+            'edit profile': 'PUT /api/v1/accounts/<username>',
+            'delete profile': 'DELETE /api/v1/accounts/<username>',
+            'login': 'POST /api/v1/accounts/login',
+            'logout': 'GET /api/v1/accounts/logout',
+            "user's tasks": 'GET /api/v1/accounts/<username>/tasks',
+            "create task": 'POST /api/v1/accounts/<username>/tasks',
+            "task detail": 'GET /api/v1/accounts/<username>/tasks/<id>',
+            "task update": 'PUT /api/v1/accounts/<username>/tasks/<id>',
+            "delete task": 'DELETE /api/v1/accounts/<username>/tasks/<id>'
+        }
+        return Response(output)
+```
+
+This is pretty much identical to what we had in Tornado.
+If we had the other routes built out, we could even do a little shortcut with one of my favorite Django functions: `reverse()`.
+When given a string that is the **name** of a route, `reverse()` will return the URI (i.e. the path without the domain name) for that route.
+So `reverse('logout')` would return `'/api/v1/accounts/logout`.
+
+Anyway, we have our `InfoView`.
+Let's hook it up to an appropriate route and be on our way.
+For good measure, we're also going to remove the `admin/` route, as we won't be using the Django administrative back end here.
+
+```python
+# in django_todo/urls.py
+from django_todo.views import InfoView
+from django.urls import path
+
+urlpatterns = [
+    path('api/v1', InfoView.as_view(), name="info"),
+]
+```
+
+Let's figure out the next URL, which will be the endpoint for either creating a new `Task` or listing all of the existing tasks for a user.
+This should exist in a `urls.py` in the `todo` app, since this has to deal directly with `Task` objects intead of being a part of the whole project.
+
+```python
+# in todo/urls.py
+from django.urls import path
+from todo.views import TaskListView
+
+urlpatterns = [
+    path('', TaskListView.as_view(), name="list_tasks")
+]
+```
+
+What's the deal with this route?
+I didn't specify a particular user, or really much of a path at all.
+Since there will be a couple of routes requiring the base path `/api/v1/accounts/<username>/tasks`, I figure why write it again and again when I can just write it once?
+
+Django allows me to take a whole suite of URLs and import them into the base `django_todo/urls.py` file.'
+I can then give every single one of those imported URLs the same base path, only worrying about the varying parts when, you know, they vary.
+
+```python
+# in django_todo/urls.py
+from django.urls import include, path
+from todo.views import TaskListView
+
+urlpatterns = [
+    path('', TaskListView.as_view(), name="list_tasks"),
+    path('api/v1/accounts/<str:username>/tasks', include('todo.urls'))
+]
+```
+
+And now every URL coming from `todo/urls.py` will be prefixed with the path `api/v1/accounts/<str:username>/tasks`.
+
 ## Wrapping Up
