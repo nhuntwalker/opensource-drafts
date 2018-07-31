@@ -803,6 +803,7 @@ In our particular case, there is a relation between each `Task` and its owner `O
 As such, we need to borrow the `serializers.PrimaryKeyRelatedField` object to specify that each `Task` will have an `Owner`.
 Its owner will be found from the set of all owners that exists.
 We get that set by doing a query for those owners and returning the results that we want to be associated with this serializer: `Owner.objects.all()`.
+We also need to include `owner` in the list of fields, as we always need an `Owner` associated with a `Task`
 
 ```python
 # todo/serializers.py
@@ -815,8 +816,38 @@ class TaskSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Task
-        fields = ('id', 'name', 'note', 'creation_date', 'due_date', 'completed')
+        fields = ('id', 'name', 'note', 'creation_date', 'due_date', 'completed', 'owner')
 ```
+
+Now that this serializer is built, we can use it for all the CRUD operations we'd like to do for our objects:
+
+- If we want to `GET` a JSONified version of a specific `Task` we can do `TaskSerializer(some_task).data`
+- If we want to accept a `POST` with the appropriate data to create a new `Task` we can use `TaskSerializer(data=new_data).save(owner=the_owner)`
+- If we want to update some existing data with a `PUT`, we can say `TaskSerializer(existing_task, data=data).save()`
+
+Not including `delete` here because you don't really need to do anything with information for a `delete` operation.
+If you have access to the object that you'd like to delete, you just say `object_instance.delete()`.
+
+An example of what some serialized data might look like can be seen below
+
+```python
+>>> from todo.models import Task
+>>> from todo.serializers import TaskSerializer
+>>> from owner.models import Owner
+>>> from django.contrib.auth.models import User
+>>> new_user = User(username='kenyatta', email='kenyatta@gmail.com')
+>>> new_user.save_password('wakandaforever')
+>>> new_user.save() # creating the User that builds the Owner
+>>> kenyatta = Owner.objects.first() # grabbing the Owner that is kenyatta
+>>> new_task = Task(name="Buy roast beef for the Sunday potluck", owner=kenyatta)
+>>> new_task.save()
+>>> TaskSerializer(new_task).data
+{'id': 1, 'name': 'Go to the supermarket', 'note': None, 'creation_date': '2018-07-31T06:00:25.165013Z', 'due_date': None, 'completed': False, 'owner': 1}
+```
+
+There's a lot more that you can do with the `ModelSerializer` objects, and I suggest you check [the docs](http://www.django-rest-framework.org/api-guide/serializers/#serializers) for the greater capabilities.
+Otherwise, this is as much as we need.
+It's time to dig into some views.
 
 ## Django - Connecting Models to Views
 
