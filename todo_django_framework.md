@@ -911,7 +911,7 @@ The first view we'll build is the `InfoView`.
 As in the previous frameworks, all we'll want to do is package and send out a dictionary of our proposed routes.
 The view itself can live in `django_todo.views` since it doesn't pertain to a specific model (and thus doesn't conceptually belong in a specific app).
 
-```python
+```python N            
 # django_todo/views.py
 from rest_framework.response import JsonResponse
 from rest_framework.views import APIView
